@@ -156,6 +156,14 @@ def test_removed_fused_lm_head_chunk_size_field_is_rejected():
         TrainerModelConfig.model_validate({"fused_lm_head_chunk_size": "auto"})
 
 
+def test_per_client_inflight_limit_covers_group_size():
+    config = OrchestratorConfig(group_size=16, max_inflight_rollouts_per_client=16)
+    assert config.max_inflight_rollouts_per_client == 16
+
+    with pytest.raises(ValidationError, match="must be at least every environment's group_size"):
+        OrchestratorConfig(group_size=16, max_inflight_rollouts_per_client=15)
+
+
 def test_to_toml_dict_roundtrips_explicit_none(tmp_path):
     """An explicit None override survives the write/re-parse round-trip used by SLURM launches."""
     config = cli(TrainerConfig, args=["--model.compile", "None", "--optim.max_norm", "None"])

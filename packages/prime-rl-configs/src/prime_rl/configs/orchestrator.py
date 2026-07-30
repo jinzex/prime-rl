@@ -530,6 +530,9 @@ class OrchestratorConfig(BaseConfig):
     max_inflight_rollouts: int | None = Field(None, ge=1)
     """Maximum number of rollouts kept in-flight. Required for token-based batching. With ``batch_size`` set, defaults to ``batch_size * oversampling_factor`` (or ``batch_size`` when ``oversampling_factor`` is unset)."""
 
+    max_inflight_rollouts_per_client: int | None = Field(None, ge=1)
+    """Maximum in-flight rollouts assigned to one inference client. New groups wait when every client would exceed this limit. None disables the per-client limit."""
+
     group_size: int = Field(1, ge=1, validation_alias=AliasChoices("group_size", "rollouts_per_example"))
     """Output sequences returned per example during training."""
 
@@ -716,6 +719,14 @@ class OrchestratorConfig(BaseConfig):
         for env_cfg in self.train.env:
             if "group_size" not in env_cfg.model_fields_set:
                 env_cfg.group_size = self.group_size
+
+        group_sizes = [self.group_size, *(env.group_size for env in self.train.env)]
+        if self.eval is not None:
+            group_sizes.extend(env.group_size for env in self.eval.env)
+        if self.max_inflight_rollouts_per_client is not None and self.max_inflight_rollouts_per_client < max(
+            group_sizes
+        ):
+            raise ValueError("max_inflight_rollouts_per_client must be at least every environment's group_size")
 
         return self
 

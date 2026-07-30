@@ -45,7 +45,7 @@ from prime_rl.orchestrator.types import (
     RolloutKind,
 )
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
-from prime_rl.utils.client import InferencePool, client_identity
+from prime_rl.utils.client import ClientIdentity, InferencePool, client_identity
 from prime_rl.utils.logger import get_logger
 
 
@@ -130,6 +130,7 @@ class RolloutDispatcher:
         policy_pool: InferencePool,
         policy: Policy,
         max_inflight_rollouts: int,
+        max_inflight_rollouts_per_client: int | None,
         tasks_per_minute: float | None,
         max_off_policy_steps: int,
     ) -> None:
@@ -144,6 +145,7 @@ class RolloutDispatcher:
         self.max_off_policy_steps = max_off_policy_steps
 
         self.max_inflight = max_inflight_rollouts
+        self.max_inflight_per_client = max_inflight_rollouts_per_client
         self.inflight_permits = 0
         self.rate_limiter: AsyncLimiter | None = (
             AsyncLimiter(tasks_per_minute, time_period=60) if tasks_per_minute else None
@@ -178,6 +180,38 @@ class RolloutDispatcher:
         if sampler.samples_from_live_policy:
             return sampler.pool, self.policy.model_name, True
         return sampler.pool, sampler.pool.model_name, False
+
+    def _client_load(self) -> Counter[ClientIdentity]:
+        load: Counter[ClientIdentity] = Counter()
+        for meta in self.inflight.values():
+            if meta.client_config is not None:
+                load[client_identity(meta.client_config)] += meta.rollout_count
+        return load
+
+    async def _select_client_for_group(
+        self, pool: InferencePool, kind: RolloutKind, group_size: int
+    ) -> vf.ClientConfig | None:
+        """Select a client for the whole group: least-loaded for train,
+        round-robin for eval, skipping clients that would exceed the per-client cap.
+        """
+        load = self._client_load()
+
+        def has_capacity(client: vf.ClientConfig) -> bool:
+            return (
+                self.max_inflight_per_client is None
+                or load[client_identity(client)] + group_size <= self.max_inflight_per_client
+            )
+
+        if kind == "train":
+            client = await pool.select_train_client(load)
+            return client if has_capacity(client) else None
+
+        assert kind == "eval"
+        for _ in range(max(1, len(pool.train_clients))):
+            client = await pool.get_eval_client()
+            if has_capacity(client):
+                return client
+        return None
 
     @property
     def inflight_train_count(self) -> int:
@@ -413,14 +447,10 @@ class RolloutDispatcher:
 
         # Pin a single client per group to keep prefix-cache hits
         if group.pinned_client is None:
-            if group.kind == "eval":
-                client = await pool.get_eval_client()
-            else:
-                load = Counter(
-                    client_identity(m.client_config) for m in self.inflight.values() if m.client_config is not None
-                )
-                client = await pool.select_train_client(load)
+            client = await self._select_client_for_group(pool, group.kind, group.target_rollouts)
             if group_id not in self.groups:
+                return False
+            if client is None:
                 return False
             group.pinned_client = client
         else:
