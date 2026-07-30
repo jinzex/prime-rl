@@ -9,6 +9,7 @@ import wandb
 from httpx import AsyncClient
 from prometheus_client.parser import text_string_to_metric_families
 
+from prime_rl.utils.client import ClientIdentity
 from prime_rl.utils.logger import get_logger
 
 POLL_INTERVAL = 5.0
@@ -43,9 +44,10 @@ COUNTER_KEYS = {
     "vllm:nixl_num_kv_expired_reqs_total": "nixl_kv_expired_requests_total",
 }
 
+WAITING_REQUEST_METRIC = "vllm:num_requests_waiting"
 GAUGE_KEYS = {
     "vllm:num_requests_running": "running_requests",
-    "vllm:num_requests_waiting": "waiting_requests",
+    WAITING_REQUEST_METRIC: "waiting_requests",
     "vllm:kv_cache_usage_perc": "kv_cache_usage_perc",
     "vllm:gpu_cache_usage_perc": "kv_cache_usage_perc",
     "vllm:cpu_cache_usage_perc": "cpu_cache_usage_perc",
@@ -113,6 +115,7 @@ class EngineRollup:
 @dataclass
 class NodeRollup:
     engines: dict[str, EngineRollup] = field(default_factory=dict)
+    metric_names: set[str] = field(default_factory=set)
 
     @property
     def engine_count(self) -> int:
@@ -149,8 +152,10 @@ class EndpointSample:
 def parse_prometheus_text(text: str) -> NodeRollup:
     """Parse vLLM Prometheus metrics into per-engine counters, gauges, and histogram totals."""
     engines: dict[str, EngineRollup] = {}
+    metric_names: set[str] = set()
     for family in text_string_to_metric_families(text):
         for sample in family.samples:
+            metric_names.add(sample.name)
             engine_id = sample.labels.get("engine", "aggregate")
             engine = engines.setdefault(engine_id, EngineRollup())
             if sample.name in GAUGE_KEYS:
@@ -162,7 +167,7 @@ def parse_prometheus_text(text: str) -> NodeRollup:
                 setattr(engine, HISTOGRAM_SUM_KEYS[sample.name], float(sample.value))
             elif sample.name in HISTOGRAM_COUNT_KEYS:
                 setattr(engine, HISTOGRAM_COUNT_KEYS[sample.name], float(sample.value))
-    return NodeRollup(engines=engines)
+    return NodeRollup(engines=engines, metric_names=metric_names)
 
 
 def build_metrics_endpoints(
@@ -412,17 +417,35 @@ class InferenceMetricsCollector:
     The ``agg`` scope is always logged. The ``prefill`` and ``decode`` scopes are
     logged only when endpoints are explicitly or implicitly identified as a
     disaggregated P/D deployment.
+
+    Raw per-endpoint queue depth is retained for rollout placement when client
+    identities are provided in the same order as the admin clients.
     """
 
-    def __init__(self, admin_clients: list[AsyncClient], roles: list[str | None] | None = None):
+    def __init__(
+        self,
+        admin_clients: list[AsyncClient],
+        roles: list[str | None] | None = None,
+        client_identities: list[ClientIdentity] | None = None,
+        log_to_wandb: bool = True,
+    ):
         self.endpoints = build_metrics_endpoints(admin_clients, roles=roles)
+        if client_identities is not None and len(self.endpoints) != len(client_identities):
+            raise ValueError(
+                "Queue-aware placement requires one admin metrics endpoint per inference client; "
+                f"got {len(self.endpoints)} endpoint(s) and {len(client_identities)} client(s)"
+            )
+        self.client_identities = client_identities
+        self.waiting_requests: dict[ClientIdentity, float] | None = None
+        self.log_to_wandb = log_to_wandb
         self.metric_history: dict[str, deque[float]] = {}
         self.previous: dict[str, TimedRollup] = {}
         self.task: asyncio.Task | None = None
         self.has_pd_roles = {endpoint.role for endpoint in self.endpoints if endpoint.role is not None} == PD_ROLES
 
     async def start(self):
-        wandb.define_metric("inference/*", step_metric="_timestamp")
+        if self.log_to_wandb:
+            wandb.define_metric("inference/*", step_metric="_timestamp")
 
         async def poll_loop():
             while True:
@@ -447,12 +470,26 @@ class InferenceMetricsCollector:
                 return None
 
         results = await asyncio.gather(*[fetch(endpoint) for endpoint in self.endpoints])
-        samples = [
-            EndpointSample(endpoint=endpoint, timestamp=now, rollup=parse_prometheus_text(text))
-            for endpoint, text in zip(self.endpoints, results)
-            if text is not None
-        ]
-        if not samples:
+        try:
+            samples = [
+                EndpointSample(endpoint=endpoint, timestamp=now, rollup=parse_prometheus_text(text))
+                for endpoint, text in zip(self.endpoints, results)
+                if text is not None
+            ]
+        except Exception:
+            self.waiting_requests = None
+            raise
+        if self.client_identities is not None:
+            self.waiting_requests = (
+                {
+                    client: sample.rollup.summed("waiting_requests")
+                    for client, sample in zip(self.client_identities, samples)
+                }
+                if len(samples) == len(self.endpoints)
+                and all(WAITING_REQUEST_METRIC in sample.rollup.metric_names for sample in samples)
+                else None
+            )
+        if not samples or not self.log_to_wandb:
             return
 
         metrics = build_scope_metrics("agg", samples, self.previous)
@@ -471,6 +508,12 @@ class InferenceMetricsCollector:
         if smoothed_metrics:
             smoothed_metrics["_timestamp"] = time.time()
             wandb.log(smoothed_metrics)
+
+    def eligible_clients(self, max_waiting_requests: int) -> set[ClientIdentity] | None:
+        """Return queue-eligible clients, or None when fresh queue data is unavailable."""
+        if self.waiting_requests is None:
+            return None
+        return {client for client, waiting in self.waiting_requests.items() if waiting <= max_waiting_requests}
 
     def smooth_metrics(self, metrics: dict[str, float]) -> dict[str, float]:
         """Add current values to the smoothing window and return W&B-ready metrics."""

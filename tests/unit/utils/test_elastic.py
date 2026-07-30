@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 from verifiers.v1.clients.config import TrainClientConfig
 
+from prime_rl.utils.client import client_identity
 from prime_rl.utils.elastic import (
     AdapterState,
     ElasticInferencePool,
@@ -444,3 +445,33 @@ def test_elastic_clients_preserve_renderer_model_name_when_model_name_updates():
                 headers={},
             )
         ]
+
+
+def test_elastic_pool_selects_only_eligible_clients():
+    async def run() -> None:
+        with patch("prime_rl.utils.elastic.get_logger"):
+            client_config = MagicMock()
+            client_config.elastic.hostname = "test.hostname"
+            client_config.elastic.port = 8000
+            client_config.elastic.sync_interval = 0.0
+            client_config.router_url = None
+            client_config.api_key_var = "PRIME_API_KEY"
+            client_config.headers = {}
+            client_config.headers_from_env = {}
+            client_config.extra_headers_from_state = {}
+            client_config.dp_rank_count = 1
+            pool = ElasticInferencePool(client_config=client_config, model_name="base-model")
+            pool._servers = {
+                "10.0.0.1": MagicMock(status="ready"),
+                "10.0.0.2": MagicMock(status="ready"),
+            }
+            worker_a, worker_b = map(client_identity, pool.train_clients)
+
+            assert client_identity(await pool.select_train_client({worker_a: 0, worker_b: 1}, {worker_b})) == worker_b
+            assert client_identity(await pool.get_eval_client({worker_b})) == worker_b
+            assert client_identity(await pool.select_train_client({worker_a: 0, worker_b: 1})) == worker_a
+            assert client_identity(await pool.get_eval_client()) == worker_a
+            assert await pool.select_train_client({}, set()) is None
+            assert await pool.get_eval_client(set()) is None
+
+    asyncio.run(run())

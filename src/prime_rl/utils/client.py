@@ -18,15 +18,24 @@ from verifiers.v1.clients.config import EvalClientConfig, TrainClientConfig
 from prime_rl.configs.shared import ClientConfig
 from prime_rl.utils.logger import get_logger
 
-# Identity tuple used by ``select_train_client`` to key load counts. ``base_url``
-# distinguishes servers; ``X-data-parallel-rank`` distinguishes DP shards within a
-# server, since the router uses that header to route to specific GPU ranks.
+# ``base_url`` distinguishes servers; ``X-data-parallel-rank`` distinguishes DP
+# shards within a server, since the router uses that header to route to GPU ranks.
 ClientIdentity = tuple[str, str | None]
 
 
 def client_identity(client: vf.ClientConfig) -> ClientIdentity:
     """Stable identity for load balancing across inference clients."""
     return (client.base_url, client.headers.get("X-data-parallel-rank"))
+
+
+def filter_eligible_clients(
+    clients: list[vf.ClientConfig],
+    eligibility: set[ClientIdentity] | None,
+) -> list[vf.ClientConfig]:
+    """Filter clients by endpoint eligibility; None leaves the pool unrestricted."""
+    if eligibility is None:
+        return clients
+    return [client for client in clients if client_identity(client) in eligibility]
 
 
 @runtime_checkable
@@ -52,16 +61,20 @@ class InferencePool(Protocol):
         """Update the model name."""
         ...
 
-    async def get_eval_client(self) -> vf.ClientConfig:
-        """Get next eval client in round-robin fashion."""
+    async def get_eval_client(self, eligible_clients: set[ClientIdentity] | None = None) -> vf.ClientConfig | None:
+        """Get the next eligible eval client in round-robin order."""
         ...
 
-    async def select_train_client(self, load: Mapping[ClientIdentity, int]) -> vf.ClientConfig:
+    async def select_train_client(
+        self,
+        load: Mapping[ClientIdentity, int],
+        eligible_clients: set[ClientIdentity] | None = None,
+    ) -> vf.ClientConfig | None:
         """Pick the train client with lowest in-flight load.
 
         Waits for at least one train client to be available, then returns
-        the one with the smallest ``load[client_identity(client)]``. The
-        caller owns the in-flight counter; the pool just picks against it.
+        the eligible one with the smallest ``load[client_identity(client)]``.
+        The caller owns the in-flight counter; the pool just picks against it.
         """
         ...
 
@@ -158,13 +171,22 @@ class StaticInferencePool:
     def eval_clients(self) -> list[vf.ClientConfig]:
         return self._eval_clients
 
-    async def get_eval_client(self) -> vf.ClientConfig:
-        return next(self._eval_cycle)
+    async def get_eval_client(self, eligible_clients: set[ClientIdentity] | None = None) -> vf.ClientConfig | None:
+        for _ in self._eval_clients:
+            client = next(self._eval_cycle)
+            if eligible_clients is None or client_identity(client) in eligible_clients:
+                return client
+        return None
 
-    async def select_train_client(self, load: Mapping[ClientIdentity, int]) -> vf.ClientConfig:
+    async def select_train_client(
+        self,
+        load: Mapping[ClientIdentity, int],
+        eligible_clients: set[ClientIdentity] | None = None,
+    ) -> vf.ClientConfig | None:
         while not self.train_clients:
             await asyncio.sleep(0.5)
-        return min(self.train_clients, key=lambda c: load[client_identity(c)])
+        clients = filter_eligible_clients(self.train_clients, eligible_clients)
+        return min(clients, key=lambda c: load[client_identity(c)]) if clients else None
 
     async def wait_for_ready(self, model_name: str, timeout: int | None = None) -> None:
         await check_health(

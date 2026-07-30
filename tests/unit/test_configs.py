@@ -554,6 +554,16 @@ def test_orchestrator_renderer_auto_accepts_mapped_model():
     assert config.renderer.name == "auto"
 
 
+def test_queue_aware_placement_rejects_elastic_inference():
+    with pytest.raises(ValidationError, match="requires a static inference pool"):
+        OrchestratorConfig.model_validate(
+            {
+                "max_waiting_requests": 0,
+                "model": {"client": {"elastic": {"hostname": "inference.local"}}},
+            }
+        )
+
+
 def test_sft_renderer_auto_accepts_prime_qwen_model():
     config = SFTConfig.model_validate({"model": {"name": "PrimeIntellect/Qwen3-0.6B"}})
     assert config.renderer.name == "auto"

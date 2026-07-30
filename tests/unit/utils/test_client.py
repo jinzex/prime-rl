@@ -6,7 +6,13 @@ import httpx
 from verifiers.v1.clients.config import EvalClientConfig
 
 from prime_rl.configs.shared import ClientConfig
-from prime_rl.utils.client import _is_retryable_lora_error, load_lora_adapter, setup_clients
+from prime_rl.utils.client import (
+    StaticInferencePool,
+    _is_retryable_lora_error,
+    client_identity,
+    load_lora_adapter,
+    setup_clients,
+)
 
 
 def test_is_retryable_lora_error_returns_true_for_404():
@@ -108,3 +114,26 @@ def test_setup_clients_preserves_chat_client_defaults():
             headers={},
         )
     ]
+
+
+def test_static_pool_selects_only_eligible_clients():
+    async def run() -> None:
+        pool = StaticInferencePool(
+            ClientConfig(
+                base_url=["http://worker-a:8000/v1", "http://worker-b:8000/v1"],
+                api_key_var="PRIME_API_KEY",
+            ),
+            model_name="test-model",
+        )
+        worker_a, worker_b = map(client_identity, pool.train_clients)
+
+        assert client_identity(await pool.select_train_client({worker_a: 0, worker_b: 1}, {worker_b})) == worker_b
+        assert client_identity(await pool.get_eval_client({worker_b})) == worker_b
+        assert client_identity(await pool.select_train_client({worker_a: 0, worker_b: 1})) == worker_a
+        assert client_identity(await pool.get_eval_client()) == worker_a
+        assert await pool.select_train_client({}, set()) is None
+        assert await pool.get_eval_client(set()) is None
+
+        await asyncio.gather(*(client.aclose() for client in pool.admin_clients))
+
+    asyncio.run(run())

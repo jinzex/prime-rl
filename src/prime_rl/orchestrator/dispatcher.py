@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Literal
@@ -45,7 +46,7 @@ from prime_rl.orchestrator.types import (
     RolloutKind,
 )
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
-from prime_rl.utils.client import InferencePool, client_identity
+from prime_rl.utils.client import ClientIdentity, InferencePool, client_identity
 from prime_rl.utils.logger import get_logger
 
 
@@ -132,6 +133,7 @@ class RolloutDispatcher:
         max_inflight_rollouts: int,
         tasks_per_minute: float | None,
         max_off_policy_steps: int,
+        client_eligibility: Callable[[], set[ClientIdentity] | None] | None = None,
     ) -> None:
         self.policy = policy
         self.train_envs = train_envs
@@ -142,6 +144,7 @@ class RolloutDispatcher:
         self.train_source = train_source
         self.eval_source = eval_source
         self.max_off_policy_steps = max_off_policy_steps
+        self.client_eligibility = client_eligibility
 
         self.max_inflight = max_inflight_rollouts
         self.inflight_permits = 0
@@ -413,13 +416,18 @@ class RolloutDispatcher:
 
         # Pin a single client per group to keep prefix-cache hits
         if group.pinned_client is None:
+            eligible_clients = (
+                self.client_eligibility() if pool is self.policy_pool and self.client_eligibility is not None else None
+            )
             if group.kind == "eval":
-                client = await pool.get_eval_client()
+                client = await pool.get_eval_client(eligible_clients)
             else:
                 load = Counter(
                     client_identity(m.client_config) for m in self.inflight.values() if m.client_config is not None
                 )
-                client = await pool.select_train_client(load)
+                client = await pool.select_train_client(load, eligible_clients)
+            if client is None:
+                return False
             if group_id not in self.groups:
                 return False
             group.pinned_client = client

@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from functools import partial
 from typing import TYPE_CHECKING
 
 import tomli_w
@@ -75,7 +76,7 @@ from prime_rl.trainer.model import setup_tokenizer
 from prime_rl.trainer.rl.broadcast.nixl.model_express import ModelExpressSession
 from prime_rl.transport import TrainingBatch, setup_training_batch_sender
 from prime_rl.utils.async_utils import EventLoopLagMonitor, EventLoopLagStats, safe_cancel
-from prime_rl.utils.client import init_nccl_broadcast, init_nixl_broadcast
+from prime_rl.utils.client import client_identity, init_nccl_broadcast, init_nixl_broadcast
 from prime_rl.utils.config import to_toml_dict
 from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.logger import format_time, get_logger, setup_logger
@@ -298,10 +299,17 @@ class Orchestrator:
             *(env.algorithm.setup() for env in self.train_envs),
         )
 
-        if config.wandb is not None and config.collect_inference_metrics:
+        log_inference_metrics = config.wandb is not None and config.collect_inference_metrics
+        if log_inference_metrics or config.max_waiting_requests is not None:
             self.inference_metrics = InferenceMetricsCollector(
                 self.policy_inference.admin_clients,
                 roles=config.inference_metrics_roles,
+                client_identities=(
+                    [client_identity(client) for client in self.policy_inference.train_clients]
+                    if config.max_waiting_requests is not None
+                    else None
+                ),
+                log_to_wandb=log_inference_metrics,
             )
             await self.inference_metrics.start()
 
@@ -394,6 +402,13 @@ class Orchestrator:
         assert config.max_inflight_rollouts is not None, "max_inflight_rollouts must be resolved before dispatcher init"
         log_interval = config.log.interval
         wandb_enabled = config.wandb is not None
+        client_eligibility = None
+        if config.max_waiting_requests is not None:
+            assert self.inference_metrics is not None
+            client_eligibility = partial(
+                self.inference_metrics.eligible_clients,
+                config.max_waiting_requests,
+            )
         self.dispatcher = RolloutDispatcher(
             train_envs=self.train_envs,
             eval_envs=self.eval_envs,
@@ -404,6 +419,7 @@ class Orchestrator:
             max_inflight_rollouts=config.max_inflight_rollouts,
             tasks_per_minute=config.tasks_per_minute,
             max_off_policy_steps=config.max_off_policy_steps,
+            client_eligibility=client_eligibility,
         )
         self.train_sink = TrainSink(
             config,

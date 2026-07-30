@@ -26,6 +26,7 @@ from prime_rl.utils.client import (
     ClientIdentity,
     PrefillScorer,
     client_identity,
+    filter_eligible_clients,
     load_lora_adapter,
     setup_admin_clients,
     setup_clients,
@@ -229,18 +230,26 @@ class ElasticInferencePool:
         self._rebuild_clients()
         return self._eval_clients
 
-    async def get_eval_client(self) -> vf.ClientConfig:
-        """Get next eval client in round-robin fashion."""
+    async def get_eval_client(self, eligible_clients: set[ClientIdentity] | None = None) -> vf.ClientConfig | None:
+        """Get next eligible eval client in round-robin fashion."""
         while not self.eval_clients:
             await asyncio.sleep(self.sync_interval)
-        client = self._eval_clients[self._eval_index % len(self._eval_clients)]
-        self._eval_index += 1
-        return client
+        for _ in self._eval_clients:
+            client = self._eval_clients[self._eval_index % len(self._eval_clients)]
+            self._eval_index += 1
+            if eligible_clients is None or client_identity(client) in eligible_clients:
+                return client
+        return None
 
-    async def select_train_client(self, load: Mapping[ClientIdentity, int]) -> vf.ClientConfig:
+    async def select_train_client(
+        self,
+        load: Mapping[ClientIdentity, int],
+        eligible_clients: set[ClientIdentity] | None = None,
+    ) -> vf.ClientConfig | None:
         while not self.train_clients:
             await asyncio.sleep(self.sync_interval)
-        return min(self.train_clients, key=lambda c: load[client_identity(c)])
+        clients = filter_eligible_clients(self.train_clients, eligible_clients)
+        return min(clients, key=lambda c: load[client_identity(c)]) if clients else None
 
     async def score(self, token_ids: list[int]) -> list[float]:
         return await self._scorer.score(self.train_clients, self.model_name, token_ids)

@@ -530,6 +530,9 @@ class OrchestratorConfig(BaseConfig):
     max_inflight_rollouts: int | None = Field(None, ge=1)
     """Maximum number of rollouts kept in-flight. Required for token-based batching. With ``batch_size`` set, defaults to ``batch_size * oversampling_factor`` (or ``batch_size`` when ``oversampling_factor`` is unset)."""
 
+    max_waiting_requests: int | None = Field(None, ge=0)
+    """Maximum queued inference requests allowed when placing a new rollout group on a static endpoint. None disables queue-aware placement."""
+
     group_size: int = Field(1, ge=1, validation_alias=AliasChoices("group_size", "rollouts_per_example"))
     """Output sequences returned per example during training."""
 
@@ -641,6 +644,12 @@ class OrchestratorConfig(BaseConfig):
                 "from the policy — the renderer-client sampling pool never runs (the renderer "
                 "is still used for client-side tokenization). Remove pool_size."
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_queue_aware_placement(self):
+        if self.max_waiting_requests is not None and self.model.client.is_elastic:
+            raise ValueError("max_waiting_requests requires a static inference pool")
         return self
 
     @model_validator(mode="after")
