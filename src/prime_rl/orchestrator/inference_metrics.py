@@ -14,6 +14,18 @@ from prime_rl.utils.logger import get_logger
 POLL_INTERVAL = 5.0
 WINDOW_SIZE = 20
 PD_ROLES = {"prefill", "decode"}
+NODE_METRIC_NAMES = {
+    "running_requests",
+    "waiting_requests",
+    "kv_cache_usage_mean",
+    "prefix_cache_hit_rate",
+    "throughput",
+    "completed_requests",
+    "avg_queue_time_seconds",
+    "avg_ttft_seconds",
+    "avg_tpot_seconds",
+    "avg_e2e_latency_seconds",
+}
 
 COUNTER_KEYS = {
     "vllm:prompt_tokens": "prompt_tokens_total",
@@ -118,6 +130,7 @@ class MetricsEndpoint:
     client: AsyncClient
     role: str | None
     key: str
+    index: int
 
 
 @dataclass(frozen=True)
@@ -162,11 +175,13 @@ def build_metrics_endpoints(
         raise ValueError(f"Got {len(roles)} inference metric role(s) for {len(admin_clients)} admin client(s)")
 
     endpoints: list[MetricsEndpoint] = []
-    for client, role in zip(admin_clients, roles):
+    for index, (client, role) in enumerate(zip(admin_clients, roles)):
         normalized_role = role if role in PD_ROLES else None
         if role is not None and normalized_role is None:
             raise ValueError(f"Unsupported inference metrics role: {role}")
-        endpoints.append(MetricsEndpoint(client=client, role=normalized_role, key=str(client.base_url).rstrip("/")))
+        endpoints.append(
+            MetricsEndpoint(client=client, role=normalized_role, key=str(client.base_url).rstrip("/"), index=index)
+        )
     return endpoints
 
 
@@ -382,6 +397,15 @@ def build_scope_metrics(
     return metrics
 
 
+def build_node_metrics(
+    sample: EndpointSample,
+    previous: dict[str, TimedRollup],
+) -> dict[str, float]:
+    """Select useful per-node metrics from the shared scope builder."""
+    metrics = build_scope_metrics(f"node_{sample.endpoint.index}", [sample], previous)
+    return {key: value for key, value in metrics.items() if key.rsplit("/", 1)[-1] in NODE_METRIC_NAMES}
+
+
 class InferenceMetricsCollector:
     """Polls vLLM Prometheus /metrics and logs smoothed role-aware values to W&B.
 
@@ -432,6 +456,8 @@ class InferenceMetricsCollector:
             return
 
         metrics = build_scope_metrics("agg", samples, self.previous)
+        for sample in samples:
+            metrics.update(build_node_metrics(sample, self.previous))
         if self.has_pd_roles:
             for role in sorted(PD_ROLES):
                 role_samples = [sample for sample in samples if sample.endpoint.role == role]
