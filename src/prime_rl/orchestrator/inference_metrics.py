@@ -25,6 +25,8 @@ NODE_METRIC_NAMES = {
     "avg_ttft_seconds",
     "avg_tpot_seconds",
     "avg_e2e_latency_seconds",
+    "spec_decode_mean_acceptance_length",
+    "spec_decode_draft_acceptance_rate",
 }
 
 COUNTER_KEYS = {
@@ -41,6 +43,12 @@ COUNTER_KEYS = {
     "vllm:nixl_num_failed_transfers_total": "nixl_failed_transfers_total",
     "vllm:nixl_num_failed_notifications_total": "nixl_failed_notifications_total",
     "vllm:nixl_num_kv_expired_reqs_total": "nixl_kv_expired_requests_total",
+    "vllm:spec_decode_num_drafts": "spec_decode_num_drafts_total",
+    "vllm:spec_decode_num_drafts_total": "spec_decode_num_drafts_total",
+    "vllm:spec_decode_num_draft_tokens": "spec_decode_num_draft_tokens_total",
+    "vllm:spec_decode_num_draft_tokens_total": "spec_decode_num_draft_tokens_total",
+    "vllm:spec_decode_num_accepted_tokens": "spec_decode_num_accepted_tokens_total",
+    "vllm:spec_decode_num_accepted_tokens_total": "spec_decode_num_accepted_tokens_total",
 }
 
 GAUGE_KEYS = {
@@ -92,6 +100,9 @@ class EngineRollup:
     nixl_failed_transfers_total: float = 0.0
     nixl_failed_notifications_total: float = 0.0
     nixl_kv_expired_requests_total: float = 0.0
+    spec_decode_num_drafts_total: float = 0.0
+    spec_decode_num_draft_tokens_total: float = 0.0
+    spec_decode_num_accepted_tokens_total: float = 0.0
     request_prefill_time_seconds_sum: float = 0.0
     request_prefill_time_seconds_count: float = 0.0
     request_decode_time_seconds_sum: float = 0.0
@@ -329,6 +340,24 @@ def build_scope_metrics(
         token_rates = [rate for rate in (prompt_token_rate, generation_token_rate) if rate is not None]
         if token_rates:
             metrics[f"{prefix}/throughput"] = sum(token_rates)
+
+    accepted_per_draft = counter_ratio(
+        samples,
+        previous,
+        "spec_decode_num_accepted_tokens_total",
+        "spec_decode_num_drafts_total",
+    )
+    if accepted_per_draft is not None:
+        metrics[f"{prefix}/spec_decode_mean_acceptance_length"] = 1 + accepted_per_draft
+
+    draft_acceptance_rate = counter_ratio(
+        samples,
+        previous,
+        "spec_decode_num_accepted_tokens_total",
+        "spec_decode_num_draft_tokens_total",
+    )
+    if draft_acceptance_rate is not None:
+        metrics[f"{prefix}/spec_decode_draft_acceptance_rate"] = draft_acceptance_rate
 
     counter_metrics = {
         "completed_requests": "request_success_total",
