@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.lora.protocol import LoadLoRAAdapterRequest
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.v1.engine import PauseMode
 
 from prime_rl.configs.inference import InferenceConfig
 from prime_rl.utils.logger import get_logger
@@ -73,9 +74,9 @@ WORKER_EXTENSION_CLS = {
 
 
 @router.post("/pause")
-async def pause(request: Request):
-    logger.debug("Received /pause request (mode=keep, clear_cache=False)")
-    await engine_client(request).pause_generation(mode="keep", clear_cache=False)
+async def pause(request: Request, mode: PauseMode = "keep", clear_cache: bool = False):
+    logger.debug(f"Received /pause request (mode={mode}, clear_cache={clear_cache})")
+    await engine_client(request).pause_generation(mode=mode, clear_cache=clear_cache)
     return {"status": "paused"}
 
 

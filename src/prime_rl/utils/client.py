@@ -347,7 +347,7 @@ def _is_retryable_admin_error(exception: BaseException) -> bool:
 # AsyncClient uses `timeout=None`, so without this a stuck server would hang the
 # weight update forever: the read timeout converts a hang into a TimeoutException
 # that tenacity retries. Sized for `/pause`, which drains in-flight requests
-# (mode="keep") and so can legitimately take a while.
+# (mode="wait") and so can legitimately take a while.
 ADMIN_TIMEOUT_S = 300.0
 # `/update_weights` runs a collective NCCL receive across all DP workers, which
 # can take longer than the other admin ops.
@@ -379,7 +379,7 @@ async def _pause_engines(admin_clients: list[AsyncClient], *, step: int) -> None
     logger = get_logger()
     logger.info(f"Updating policy in-flight to v{step}")
     await asyncio.gather(
-        *[_admin_post(client, "/pause", params={"mode": "keep", "clear_cache": "false"}) for client in admin_clients]
+        *[_admin_post(client, "/pause", params={"mode": "wait", "clear_cache": "false"}) for client in admin_clients]
     )
     logger.debug("All inference engines paused")
 

@@ -1,12 +1,20 @@
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 from verifiers.v1.clients.config import EvalClientConfig
 
 from prime_rl.configs.shared import ClientConfig
-from prime_rl.utils.client import _is_retryable_lora_error, load_lora_adapter, setup_clients
+from prime_rl.utils.client import _is_retryable_lora_error, _pause_engines, load_lora_adapter, setup_clients
+
+
+def test_pause_engines_drains_inflight_requests():
+    client = AsyncMock()
+    with patch("prime_rl.utils.client._admin_post", new_callable=AsyncMock) as post:
+        asyncio.run(_pause_engines([client], step=1))
+
+    post.assert_awaited_once_with(client, "/pause", params={"mode": "wait", "clear_cache": "false"})
 
 
 def test_is_retryable_lora_error_returns_true_for_404():
