@@ -9,7 +9,8 @@
 	shallow = true
 [submodule "research-environments"]
 	path = deps/research-environments
-	url = git@github.com:PrimeIntellect-ai/research-environments.git
+	url = git@github.com:jinzex/research-environments.git
+	branch = jinzex/swe-rl
 	shallow = true
 [submodule "pydantic-config"]
 	path = deps/pydantic-config
