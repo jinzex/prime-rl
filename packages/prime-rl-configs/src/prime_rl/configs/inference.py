@@ -600,10 +600,12 @@ class InferenceConfig(BaseConfig):
         if kv_transfer_config is not None:
             rsetattr(namespace, "kv_transfer_config", kv_transfer_config)
 
+        # Set the LM-head dtype to float32 if enabled.
         if self.enable_fp32_lm_head:
             existing = getattr(namespace, "hf_overrides", None) or {}
             existing["head_dtype"] = "float32"
             rsetattr(namespace, "hf_overrides", existing)
+
         # Pass prime-rl-specific flags through vLLM's additional_config dict;
         # workers read these via get_current_vllm_config().additional_config.
         if self.enable_fp32_router_logits:
