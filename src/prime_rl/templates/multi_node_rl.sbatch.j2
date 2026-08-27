@@ -59,7 +59,9 @@ export PROJECT_DIR={{ project_dir }}
 export CONFIG_DIR={{ config_dir }}
 export OUTPUT_DIR={{ output_dir }}
 export ORCHESTRATOR_OUTPUT_DIR={{ orchestrator_output_dir }}
-mkdir -p $OUTPUT_DIR/logs/trainer $OUTPUT_DIR/logs/inference
+export TRAINER_DONE_FILE="$OUTPUT_DIR/control/trainer_done_$SLURM_JOB_ID"
+export ORCHESTRATOR_DONE_FILE="$OUTPUT_DIR/control/orchestrator_done_$SLURM_JOB_ID"
+mkdir -p $OUTPUT_DIR/logs/trainer $OUTPUT_DIR/logs/inference $OUTPUT_DIR/control
 rm -f $OUTPUT_DIR/logs/inference/*.log
 ln -sfn trainer/node_0.log $OUTPUT_DIR/logs/trainer.log
 ln -sfn inference/node_0.log $OUTPUT_DIR/logs/inference.log
@@ -150,10 +152,10 @@ source .venv/bin/activate
 # all finish. `set -e` above aborts the job if any node's sync fails. Re-source .env
 # inside the task because unexported vars in .env don't cross srun even with normal
 # SLURM env propagation; otherwise uv would silently fall back to the shared .venv.
-srun --ntasks-per-node=1 bash -c 'cd $PROJECT_DIR && { [ -f .env ] && source .env || true; } && uv sync --all-extras --all-packages'
+srun --ntasks-per-node=1 bash -c 'cd $PROJECT_DIR && { [ -f .env ] && source .env || true; } && uv sync --extra all --all-packages'
 {% else %}
 # Shared (NFS) venv: one sync on the batch node populates it for all nodes.
-uv sync --all-extras --all-packages
+uv sync --extra all --all-packages
 {% endif %}
 
 {% if pre_run_command %}
@@ -394,7 +396,7 @@ else
 
     echo $HOSTNAMES_STR | tee $OUTPUT_DIR/logs/trainer/node_${TRAIN_NODE_RANK}.log
 
-    WANDB_SHARED_LABEL=trainer uv run torchrun \
+    ( WANDB_SHARED_LABEL=trainer uv run torchrun \
         --role=trainer \
         --nnodes=$NUM_TRAIN_NODES \
         --nproc-per-node=$GPUS_PER_NODE \
@@ -407,7 +409,14 @@ else
         --local-ranks-filter={{ ranks_filter }} \
         -m prime_rl.trainer.rl.train \
         @ $CONFIG_DIR/trainer.toml \
-        2>&1 | sed -u 's/^\[[a-zA-Z]*[0-9]*\]://' | tee -a $OUTPUT_DIR/logs/trainer/node_${TRAIN_NODE_RANK}.log &
+        2>&1 | sed -u 's/^\[[a-zA-Z]*[0-9]*\]://' | tee -a $OUTPUT_DIR/logs/trainer/node_${TRAIN_NODE_RANK}.log
+    TRAINER_EXIT_CODE=$?
+    if [ "$TRAINER_EXIT_CODE" -eq 0 ] && [ "$TRAIN_NODE_RANK" -eq 0 ]; then
+        touch "$TRAINER_DONE_FILE"
+        TRAINER_EXIT_CODE=$?
+    fi
+    exit "$TRAINER_EXIT_CODE"
+    ) &
 {% if num_infer_nodes > 0 %}    fi{% endif %}
 {% if num_infer_nodes > 0 %}
 # Launch the orchestrator on one node. Default is trainer rank 0 (SLURM_PROCID ==
@@ -426,11 +435,24 @@ if [ "$SLURM_PROCID" -eq "$ORCH_PROCID" ]; then
 {%- endfor %}
 {%- endif %}
     {% if use_nccl_broadcast %}ORCHESTRATOR_ARGS="$ORCHESTRATOR_ARGS --weight_broadcast.host $MASTER_ADDR"
-    {% endif %}WANDB_SHARED_LABEL=orchestrator uv run orchestrator $ORCHESTRATOR_ARGS \
-        2>&1 | tee $OUTPUT_DIR/logs/orchestrator.log &
+    {% endif %}( WANDB_SHARED_LABEL=orchestrator uv run orchestrator $ORCHESTRATOR_ARGS \
+        2>&1 | tee $OUTPUT_DIR/logs/orchestrator.log
+    ORCHESTRATOR_EXIT_CODE=$?
+    if [ "$ORCHESTRATOR_EXIT_CODE" -eq 0 ]; then
+        touch "$ORCHESTRATOR_DONE_FILE"
+        ORCHESTRATOR_EXIT_CODE=$?
+    fi
+    exit "$ORCHESTRATOR_EXIT_CODE"
+    ) &
 fi
 {% endif %}
 
+{% if num_infer_nodes > 0 %}if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
+    # Successful components do not trigger --kill-on-bad-exit, so inference nodes
+    # also stop once both the trainer and orchestrator finish cleanly.
+    while [ ! -e "$TRAINER_DONE_FILE" ] || [ ! -e "$ORCHESTRATOR_DONE_FILE" ]; do sleep 2; done &
+fi
+{% endif %}
 # Wait for the first background job to exit and propagate its exit code. This
 # turns background process crashes (router, orchestrator) into task failures
 # that --kill-on-bad-exit=1 can broadcast to the other nodes so the whole job
@@ -445,7 +467,7 @@ REMAINING_PIDS=$(jobs -p)
 # in-flight trainer checkpoint on this node finish, and — because the task has
 # not exited yet — keeps --kill-on-bad-exit from reaping checkpointing trainers
 # on peer nodes. We then propagate the exit code so the allocation tears down. A
-# clean (zero) exit cannot trip --kill-on-bad-exit, so we tear down immediately.
+# clean (zero) exit tears down the local task immediately.
 if [ "$EXIT_CODE" -ne 0 ]; then
     echo "[$(hostname)] component exited with code $EXIT_CODE - waiting up to {{ cleanup_grace_period }}s for in-flight checkpoints to flush before teardown"
     sleep {{ cleanup_grace_period }}

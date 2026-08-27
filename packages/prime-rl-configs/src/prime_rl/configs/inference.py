@@ -408,7 +408,7 @@ class InferenceConfig(BaseConfig):
     """Return routed experts in responses. Forwarded as ``--enable-return-routed-experts``."""
 
     enable_fp32_lm_head: bool = True
-    """Run the lm_head projection in fp32 via a native bf16×bf16 → fp32 GEMM (``torch.mm`` with ``out_dtype=torch.float32``). Stabilizes logprob precision under FP8/bf16 inference, matching SGLang's ``--enable-fp32-lm-head``. Implemented as a monkey-patch over vLLM's LogitsProcessor, activated by setting ``additional_config["fp32_lm_head"] = True`` on the vLLM config."""
+    """Run the lm_head projection in fp32 via vLLM's native ``head_dtype`` override."""
 
     enable_fp32_router_logits: bool = True
     """Emit fp32 MoE router logits for DeepSeek-family models (incl. GLM-5.x) by setting ``out_dtype=float32`` on the gate: the bf16×bf16 gate GEMM writes its fp32 accumulator out unrounded instead of truncating logits to bf16 before expert scoring. Matches fp32-routed checkpoints (e.g. GLM-5.x, trained with Megatron ``--moe-router-dtype fp32``); pairs with ``trainer.model.moe_router_dtype = "float32"``. Implemented as a monkey-patch over vLLM's DeepseekV2MoE, activated by setting ``additional_config["fp32_router_logits"] = True`` on the vLLM config."""
@@ -600,12 +600,12 @@ class InferenceConfig(BaseConfig):
         if kv_transfer_config is not None:
             rsetattr(namespace, "kv_transfer_config", kv_transfer_config)
 
+        if self.enable_fp32_lm_head:
+            existing = getattr(namespace, "hf_overrides", None) or {}
+            existing["head_dtype"] = "float32"
+            rsetattr(namespace, "hf_overrides", existing)
         # Pass prime-rl-specific flags through vLLM's additional_config dict;
         # workers read these via get_current_vllm_config().additional_config.
-        if self.enable_fp32_lm_head:
-            existing = getattr(namespace, "additional_config", None) or {}
-            existing["fp32_lm_head"] = True
-            rsetattr(namespace, "additional_config", existing)
         if self.enable_fp32_router_logits:
             existing = getattr(namespace, "additional_config", None) or {}
             existing["fp32_router_logits"] = True

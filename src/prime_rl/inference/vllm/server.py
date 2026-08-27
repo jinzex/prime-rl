@@ -7,8 +7,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from starlette.datastructures import State
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.api_server import init_app_state
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.launchers.api_server.app_state import init_app_state
+from vllm.entrypoints.launchers.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.lora.protocol import LoadLoRAAdapterRequest
@@ -159,33 +159,15 @@ async def custom_init_app_state(
     args: Namespace,
     supported_tasks: tuple,
 ):
-    """
-    Modifies init_app_state:
-    1. Call the original init_app_state to set up standard state, including
-       vLLM 0.20's ``serving_tokens`` for ``/inference/v1/generate``.
-    2. Replace ``serving_tokens`` with ``PrimeRlServingTokens`` so DP-rank
-       routing and ``routed_experts`` export survive the migration off the
-       legacy ``/v1/generate`` endpoint.
-    """
+    """Initialize vLLM state plus prime-RL's liveness timeout."""
     await init_app_state(engine_client, state, args, supported_tasks)
 
     state.liveness_timeout_seconds = args.liveness_timeout_seconds
 
-    # Swap in our ServingTokens subclass for /inference/v1/generate so the
-    # X-data-parallel-rank header and routed_experts response field — both
-    # used by prime-RL's renderer / router-replay paths — keep working.
-    if "generate" in supported_tasks and state.serving_tokens is not None:
-        from prime_rl.inference.vllm.serving_tokens import PrimeRlServingTokens
 
-        upstream = state.serving_tokens
-        prime_serving = object.__new__(PrimeRlServingTokens)
-        prime_serving.__dict__.update(upstream.__dict__)
-        state.serving_tokens = prime_serving
-
-
-import vllm.entrypoints.openai.api_server
+import vllm.entrypoints.launchers.api_server.entry
 import vllm.v1.utils
-from vllm.entrypoints.openai.api_server import build_app as _original_build_app
+from vllm.entrypoints.launchers.app import build_app as _original_build_app
 from vllm.v1.utils import run_api_server_worker_proc as _original_run_api_server_worker_proc
 
 
@@ -208,8 +190,8 @@ def custom_run_api_server_worker_proc(listen_address, sock, args, client_config=
     _original_run_api_server_worker_proc(listen_address, sock, args, client_config, **uvicorn_kwargs)
 
 
-vllm.entrypoints.openai.api_server.init_app_state = custom_init_app_state
-vllm.entrypoints.openai.api_server.build_app = custom_build_app
+vllm.entrypoints.launchers.api_server.entry.init_app_state = custom_init_app_state
+vllm.entrypoints.launchers.api_server.entry.build_app = custom_build_app
 vllm.v1.utils.run_api_server_worker_proc = custom_run_api_server_worker_proc
 
 

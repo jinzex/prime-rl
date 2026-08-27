@@ -164,6 +164,11 @@ def test_per_client_inflight_limit_covers_group_size():
         OrchestratorConfig(group_size=16, max_inflight_rollouts_per_client=15)
 
 
+def test_inference_fp32_lm_head_uses_native_vllm_override():
+    config = InferenceConfig()
+    assert config.to_vllm().hf_overrides["head_dtype"] == "float32"
+
+
 def test_to_toml_dict_roundtrips_explicit_none(tmp_path):
     """An explicit None override survives the write/re-parse round-trip used by SLURM launches."""
     config = cli(TrainerConfig, args=["--model.compile", "None", "--optim.max_norm", "None"])

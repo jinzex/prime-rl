@@ -143,16 +143,25 @@ class NCCLWeightUpdateWorker(Worker):
         else:
             model = model_runner.model
         assert isinstance(model, Module)
+        get_draft_model = getattr(model_runner, "get_draft_model", None)
+        draft_model = get_draft_model() if get_draft_model is not None else None
+        draft_parameters = tuple(draft_model.parameters()) if draft_model is not None else ()
+        draft_versions = tuple(p._version for p in draft_parameters)
 
         state_iter = self.nccl_broadcast_receiver.receive_state_dict()
         if self.quantize_in_weight_transfer:
             load_weights_kernel(model, state_iter)
             update_mla_absorbed_weights(model)
-            return
+        else:
+            load_weights_checkpoint_layerwise(
+                model,
+                state_iter,
+                self.model_runner.model_config,
+                self.vllm_config,
+            )
 
-        load_weights_checkpoint_layerwise(
-            model,
-            state_iter,
-            self.model_runner.model_config,
-            self.vllm_config,
-        )
+        if draft_parameters:
+            assert tuple(p._version for p in draft_parameters) == draft_versions, (
+                "Draft weights changed during target update"
+            )
+            logger.info("Verified draft weights unchanged during target update")
